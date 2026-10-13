@@ -1,0 +1,57 @@
+services:
+  mongo:
+    image: mongo:7
+    command: ["--replSet", "rs0", "--bind_ip_all"]
+    healthcheck:
+      # Initiates the single-node replica set on first run; a replica set is
+      # required for multi-document transactions (transactional outbox).
+      test: mongosh --quiet --eval "try { rs.status().ok } catch (e) { rs.initiate().ok }"
+      interval: 5s
+      timeout: 10s
+      retries: 12
+    volumes:
+      - mongo-data:/data/db
+
+  control-plane:
+    build: .
+    ports:
+      - "8000:8000"
+    env_file:
+      - path: .env
+        required: true
+    environment:
+      MONGO_URL: mongodb://mongo:27017/?replicaSet=rs0
+    depends_on:
+      mongo:
+        condition: service_healthy
+
+  worker:
+    build: .
+    command: ["python", "-m", "worker.simulator"]
+    env_file:
+      - path: .env
+        required: true
+    environment:
+      FAIL_RATE: "${FAIL_RATE:-0}"
+      MIN_DELAY_MS: "${MIN_DELAY_MS:-500}"
+      MAX_DELAY_MS: "${MAX_DELAY_MS:-2000}"
+    depends_on:
+      control-plane:
+        condition: service_started
+
+  tests:
+    build: .
+    profiles: ["test"]
+    command: ["pytest", "-q"]
+    environment:
+      MONGO_URL: mongodb://mongo:27017/?replicaSet=rs0
+      # Tests mock SQS with moto; dummy creds keep boto3 happy.
+      AWS_ACCESS_KEY_ID: testing
+      AWS_SECRET_ACCESS_KEY: testing
+      AWS_REGION: us-east-1
+    depends_on:
+      mongo:
+        condition: service_healthy
+
+volumes:
+  mongo-data:
